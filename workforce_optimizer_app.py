@@ -1,3 +1,4 @@
+
 import hashlib
 import streamlit as st
 import pandas as pd
@@ -23,7 +24,7 @@ st.markdown(
 
 # ─── CONSTANTS ────────────────────────────────────────────────────────────────
 # Emoji color indicators for each skill type used in display throughout the UI
-SKILL_COLORS = {"A": "A", "B": "B", "C": "C", "D": "D", "E": "E"}
+SKILL_COLORS = {"A": "🟠", "B": "🔵", "C": "🟢", "D": "🟣", "E": "🔴"}
 
 # Expected column names for each sheet in the uploaded Excel template.
 # These are validated on upload to give the user clear feedback if something is missing.
@@ -758,9 +759,9 @@ st.divider()
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
 tab_labels = [
-    "Dashboard", "Employees", "Projects",
-    "Assignments", "Skill Gap Advisor",
-    "Departure Planner", "Emergency Coverage",
+    "📊 Dashboard", "👥 Employees", "📁 Projects",
+    "📋 Assignments", "🎯 Skill Gap Advisor",
+    "👤 Departure Planner", "🚨 Emergency Coverage",
 ]
 tabs = st.tabs(tab_labels)
 
