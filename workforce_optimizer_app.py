@@ -565,10 +565,19 @@ def analyze_skill_gap(employees, tasks, projects):
     for t in tasks:
         total_demand[t["type"]] += t["minHours"]
     for e in employees:
+        # Only consider skills this employee has that also appear in task demand
+        relevant_skills = [s for s in e["skills"] if s in total_demand and total_demand[s] > 0]
+        total_rel_demand = sum(total_demand[s] for s in relevant_skills)
         for s in e["skills"]:
             if s in total_supply:
-                total_supply[s] += e["capacity"]
-                emp_count[s]    += 1
+                emp_count[s] += 1
+                if total_rel_demand > 0 and s in relevant_skills:
+                    # Allocate capacity proportionally to demand weight of this skill
+                    weight = total_demand[s] / total_rel_demand
+                    total_supply[s] += e["capacity"] * weight
+                elif total_rel_demand == 0:
+                    # Employee has the skill but no tasks demand it — split evenly as fallback
+                    total_supply[s] += e["capacity"] / max(len(e["skills"]), 1)
 
     opt = run_optimizer(employees, tasks, projects)
 
@@ -808,7 +817,20 @@ with tabs[0]:
     skill_rows = []
     for sk in skill_types:
         dem    = sum(t["minHours"] for t in TASKS if t["type"] == sk)
-        sup    = sum(e["capacity"] for e in EMPLOYEES if sk in e["skills"])
+        sup    = 0.0
+        for e in EMPLOYEES:
+            if sk not in e["skills"]:
+                continue
+            rel_skills       = [s for s in e["skills"] if s in skill_types]
+            total_rel_demand = sum(
+                sum(t["minHours"] for t in TASKS if t["type"] == s)
+                for s in rel_skills
+            )
+            if total_rel_demand > 0:
+                weight = dem / total_rel_demand
+                sup   += e["capacity"] * weight
+            else:
+                sup   += e["capacity"] / max(len(e["skills"]), 1)
         ratio  = dem / sup if sup > 0 else 99
         status = ("surplus" if ratio <= 0.6 else "healthy" if ratio <= 1.0
                   else "tight" if ratio <= 1.3 else "critical")
