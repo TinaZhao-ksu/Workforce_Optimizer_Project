@@ -61,6 +61,14 @@ def build_blank_template() -> bytes:
         [14, 14, 14, 14, 12],
     )
 
+    ws = wb.create_sheet("Seeds")
+    write_sheet(ws,
+        ["employee", "task_id", "seed_hours"],
+        [["E001", "T001", 8], ["E002", "T002", 12]],
+        ["Must match Employees sheet", "Must match Tasks sheet", "Expected hours (best guess)"],
+        [18, 16, 16],
+    )
+
     ws = wb.create_sheet("Data Dictionary")
     dict_headers = ["Sheet", "Column", "Type", "Description"]
     dict_rows = [
@@ -78,6 +86,9 @@ def build_blank_template() -> bytes:
         ("Tasks",     "task_type",       "Category", "Required skill type (A-E)"),
         ("Tasks",     "min_hours",       "Integer",  "Minimum hours to complete task"),
         ("Tasks",     "Urgency",         "Optional", "Not used by optimizer"),
+        ("Seeds",     "employee",        "ID",       "Must match an employee ID — sheet is optional"),
+        ("Seeds",     "task_id",         "ID",       "Must match a task ID"),
+        ("Seeds",     "seed_hours",      "Float",    "Expected hours for this employee on this task"),
     ]
     for c, h in enumerate(dict_headers, 1):
         ws.cell(1, c, h).font = Font(bold=True)
@@ -145,10 +156,21 @@ def load_data(xl):
         for _, r in task_df.iterrows()
     ]
 
-    return employees, projects, tasks
+    seeds = {}
+    if "Seeds" in xl.sheet_names:
+        seed_df = strip_cols(pd.read_excel(xl, sheet_name="Seeds"))
+        for _, r in seed_df.iterrows():
+            emp_id  = str(r["employee"]).strip()
+            task_id = str(r["task_id"]).strip()
+            hours   = float(r["seed_hours"])
+            if hours > 0:
+                seeds[(emp_id, task_id)] = hours
+
+    return employees, projects, tasks, seeds
 
 
-def run_optimizer(employees, tasks, projects):
+def run_optimizer(employees, tasks, projects, seeds=None, seed_weight=1.0):
+    seeds = seeds or {}
     emp_map  = {e["id"]: e for e in employees}
     task_map = {t["id"]: t for t in tasks}
     proj_map = {p["id"]: p for p in projects}
@@ -160,9 +182,19 @@ def run_optimizer(employees, tasks, projects):
     x = {(i, j): pulp.LpVariable(f"x_{i}_{j}", lowBound=0) for i, j in pairs}
     s = {t["id"]: pulp.LpVariable(f"s_{t['id']}", lowBound=0) for t in tasks}
 
-    prob += pulp.lpSum(
-        (2 if proj_map.get(task_map[j]["project"], {}).get("reimbursable") else 1) * s[j]
-        for j in s
+    # Seed deviation variables
+    seed_pairs = [(i, j) for (i, j) in seeds if (i, j) in x]
+    dp = {k: pulp.LpVariable(f"dp_{k[0]}_{k[1]}", lowBound=0) for k in seed_pairs}
+    dm = {k: pulp.LpVariable(f"dm_{k[0]}_{k[1]}", lowBound=0) for k in seed_pairs}
+    for k in seed_pairs:
+        prob += x[k] - dp[k] + dm[k] == seeds[k]
+
+    prob += (
+        pulp.lpSum(
+            (2 if proj_map.get(task_map[j]["project"], {}).get("reimbursable") else 1) * s[j]
+            for j in s
+        )
+        + seed_weight * pulp.lpSum(dp[k] + dm[k] for k in seed_pairs)
     )
 
     for e in employees:
@@ -216,6 +248,7 @@ def run_optimizer(employees, tasks, projects):
                 "employee": primary,
                 "hours":    round(hours, 1),
                 "partial":  hours < t["minHours"] - 0.5,
+                "seeded":   (primary, t["id"]) in seed_pairs,
             }
 
     return {
@@ -260,6 +293,12 @@ with st.sidebar:
 
     st.divider()
     uploaded_file = st.file_uploader("Choose Excel file (.xlsx)", type=["xlsx"])
+    st.divider()
+    seed_weight = st.slider(
+        "Seed adherence",
+        min_value=0.0, max_value=5.0, value=1.0, step=0.5,
+        help="0 = ignore seeds, 5 = follow seeds very closely",
+    )
 
 if uploaded_file is None:
     st.info("Upload your Excel template in the sidebar to get started.")
@@ -277,17 +316,18 @@ if not valid:
     st.stop()
 
 try:
-    EMPLOYEES, PROJECTS, TASKS = load_data(xl)
+    EMPLOYEES, PROJECTS, TASKS, SEEDS = load_data(xl)
 except Exception as e:
     st.error(f"Error loading data: {e}")
     st.stop()
 
-st.sidebar.success(f"{len(EMPLOYEES)} employees · {len(PROJECTS)} projects · {len(TASKS)} tasks")
+seed_info = f" · {len(SEEDS)} seeds" if SEEDS else ""
+st.sidebar.success(f"{len(EMPLOYEES)} employees · {len(PROJECTS)} projects · {len(TASKS)} tasks{seed_info}")
 
-cache_key = f"{uploaded_file.name}_{uploaded_file.size}"
+cache_key = f"{uploaded_file.name}_{uploaded_file.size}_{seed_weight}"
 if st.session_state.get("_cache_key") != cache_key:
     with st.spinner("Running optimizer..."):
-        st.session_state["opt_result"]  = run_optimizer(EMPLOYEES, TASKS, PROJECTS)
+        st.session_state["opt_result"]  = run_optimizer(EMPLOYEES, TASKS, PROJECTS, SEEDS, seed_weight)
         st.session_state["_cache_key"] = cache_key
 
 opt     = st.session_state["opt_result"]
@@ -518,6 +558,7 @@ with tabs[3]:
             "Status":       "Failed"    if not eid
                             else "Partial" if a.get("partial")
                             else "OK",
+            "Seeded":      "Yes" if a.get("seeded") else "—",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -545,65 +586,6 @@ with tabs[4]:
                  f"Only 1 holder: {', '.join(single_holder)}" if single_holder else "None")
     col_c.metric("Unused Skills",     len(unused_skills),
                  f"Not needed: {', '.join(unused_skills)}" if unused_skills else "None")
-
-    st.divider()
-
-    # Skill coverage table
-    st.subheader("Skill Coverage")
-    coverage_rows = []
-    for sk in all_skills:
-        holders    = skill_holders.get(sk, [])
-        n_holders  = len(holders)
-        demand_hrs = skill_demand_hrs.get(sk, 0)
-        n_tasks    = skill_task_count.get(sk, 0)
-
-        supply_hrs = 0.0
-        for e in EMPLOYEES:
-            if sk not in e["skills"]:
-                continue
-            rel = [s for s in e["skills"] if s in skill_demand_hrs and skill_demand_hrs[s] > 0]
-            tot_rel_dem = sum(skill_demand_hrs[s] for s in rel)
-            if tot_rel_dem > 0 and demand_hrs > 0:
-                supply_hrs += e["capacity"] * (demand_hrs / tot_rel_dem)
-            elif n_tasks == 0:
-                supply_hrs += e["capacity"] / max(len(e["skills"]), 1)
-
-        if demand_hrs > 0:
-            ratio   = demand_hrs / supply_hrs if supply_hrs else 99
-            cov_pct = round(min(supply_hrs / demand_hrs, 1) * 100)
-            health  = "Critical" if ratio > 1.3 else "Tight" if ratio > 1.0 else "Healthy" if ratio > 0.6 else "Surplus"
-        else:
-            cov_pct = 100
-            health  = "Not needed"
-
-        if n_holders == 0 and demand_hrs > 0:
-            action = "Recruit or train immediately"
-        elif n_holders == 1 and demand_hrs > 0:
-            action = "Train a backup — single point of failure"
-        elif cov_pct < 70:
-            action = "Consider upskilling or new hire"
-        elif sk not in all_skills_in_tasks:
-            action = "Available for new initiatives"
-        else:
-            action = "No action needed"
-
-        coverage_rows.append({
-            "Skill":              sk,
-            "Employees w/ Skill": n_holders,
-            "Task Count":         n_tasks,
-            "Demand (h)":         demand_hrs,
-            "Coverage %":         cov_pct if demand_hrs > 0 else None,
-            "Health":             health,
-            "Recommended Action": action,
-        })
-
-    st.dataframe(
-        pd.DataFrame(coverage_rows),
-        use_container_width=True, hide_index=True,
-        column_config={"Coverage %": st.column_config.ProgressColumn(
-            "Coverage %", min_value=0, max_value=100, format="%d%%"
-        )},
-    )
 
     st.divider()
 
