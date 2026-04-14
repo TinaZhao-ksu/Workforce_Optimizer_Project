@@ -1,4 +1,5 @@
 import io
+import math
 import streamlit as st
 import pandas as pd
 import pulp
@@ -23,19 +24,15 @@ REQUIRED_COLS = {
 
 
 # Build and return an in-memory blank Excel template (.xlsx bytes).
-# Each sheet gets a bold header row, two example rows, and a notes row. No color styling.
 def build_blank_template() -> bytes:
     def write_sheet(ws, headers, rows, notes, widths):
-        # Header row — bold
         for c, h in enumerate(headers, 1):
             cell = ws.cell(1, c, h)
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center")
-        # Example data rows
         for r, row in enumerate(rows, 2):
             for c, v in enumerate(row, 1):
                 ws.cell(r, c, v)
-        # Notes row — italic, small
         for c, n in enumerate(notes, 1):
             cell = ws.cell(len(rows) + 2, c, n)
             cell.font = Font(italic=True, size=9)
@@ -101,7 +98,6 @@ def build_blank_template() -> bytes:
 
 
 # Check that the uploaded file has the required sheets and columns.
-# Returns (True, None) on success or (False, error string) on failure.
 def validate_template(xl):
     missing_sheets = {"Employees", "Projects", "Tasks"} - set(xl.sheet_names)
     if missing_sheets:
@@ -136,10 +132,11 @@ def load_data(xl):
     proj_df = strip_cols(pd.read_excel(xl, sheet_name="Projects"))
     projects = [
         {
-            "id":          str(r["project"]).strip(),
-            "reimbursable": bool(r["reimbursable"]),
-            "maxTotal":    None if pd.isna(r["max_total"]) else int(r["max_total"]),
-            "budget":      None if pd.isna(r["budget ($)"]) else float(r["budget ($)"]),
+            "id":           str(r["project"]).strip(),
+            # FIX #6: bool("FALSE") == True in Python — parse string explicitly
+            "reimbursable": str(r["reimbursable"]).strip().upper() not in ("FALSE", "0", "NO", ""),
+            "maxTotal":     None if pd.isna(r["max_total"]) else int(r["max_total"]),
+            "budget":       None if pd.isna(r["budget ($)"]) else float(r["budget ($)"]),
         }
         for _, r in proj_df.iterrows()
     ]
@@ -159,25 +156,11 @@ def load_data(xl):
 
 
 # Solve the workforce allocation as a linear program using PuLP.
-#
-# Variables:
-#   x[i,j]  hours employee i works on task j  (>= 0, only valid skill pairs)
-#   s[j]    unmet hours for task j             (>= 0)
-#
-# Objective: minimize sum(w_j * s_j)
-#   w_j = 2 for reimbursable project tasks, 1 otherwise (covers billable work first)
-#
-# Constraints:
-#   1. sum_j x[i,j] <= capacity[i]                   (employee capacity)
-#   2. sum_i x[i,j] + s[j] >= minHours[j]            (task demand)
-#   3. sum_{j in p} x[i,j] <= maxTotal[p]            (project hour cap, reimbursable)
-#   4. sum_{j in p} x[i,j] * rate[i] <= budget[p]    (project dollar budget)
 def run_optimizer(employees, tasks, projects):
     emp_map  = {e["id"]: e for e in employees}
     task_map = {t["id"]: t for t in tasks}
     proj_map = {p["id"]: p for p in projects}
 
-    # Only create variables for employee-task pairs where the skill matches
     pairs = [(e["id"], t["id"]) for e in employees for t in tasks
              if t["type"] in e["skills"]]
 
@@ -221,7 +204,6 @@ def run_optimizer(employees, tasks, projects):
 
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
-    # Collect results
     load    = {e["id"]: 0.0 for e in employees}
     p_hours = {p["id"]: 0.0 for p in projects}
     p_cost  = {p["id"]: 0.0 for p in projects}
@@ -246,11 +228,14 @@ def run_optimizer(employees, tasks, projects):
             asgn[t["id"]] = {
                 "employee": primary,
                 "hours":    round(hours, 1),
-                "partial":  hours < t["minHours"] - 0.5,
+                # FIX #5: use 1% tolerance instead of magic -0.5 constant
+                "partial":  hours < t["minHours"] * 0.99,
             }
 
     return {
         "asgn":    asgn,
+        # FIX #2: expose raw per-task per-employee hours for accurate cost breakdown
+        "ta":      ta,
         "load":    {k: round(v, 1) for k, v in load.items()},
         "p_hours": {k: round(v, 1) for k, v in p_hours.items()},
         "p_cost":  {k: round(v, 2) for k, v in p_cost.items()},
@@ -262,7 +247,7 @@ def run_optimizer(employees, tasks, projects):
 st.markdown("## Workforce Optimizer")
 st.caption("Upload your data template in the sidebar to run the optimizer.")
 
-# Sidebar: downloads and file upload
+# Sidebar
 with st.sidebar:
     st.header("Data Import")
     st.markdown("Upload an Excel file with three sheets: **Employees**, **Projects**, and **Tasks**.")
@@ -294,12 +279,10 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Choose Excel file (.xlsx)", type=["xlsx"])
 
 
-# Stop here until a file is uploaded
 if uploaded_file is None:
     st.info("Upload your Excel template in the sidebar to get started.")
     st.stop()
 
-# Parse, validate, and load the uploaded file
 try:
     xl = pd.ExcelFile(uploaded_file)
 except Exception as e:
@@ -319,16 +302,16 @@ except Exception as e:
 
 st.sidebar.success(f"{len(EMPLOYEES)} employees · {len(PROJECTS)} projects · {len(TASKS)} tasks")
 
-# Run the LP optimizer and cache results so tab switching doesn't re-solve
 cache_key = f"{uploaded_file.name}_{uploaded_file.size}"
 if st.session_state.get("_cache_key") != cache_key:
     with st.spinner("Running optimizer..."):
         st.session_state["opt_result"]  = run_optimizer(EMPLOYEES, TASKS, PROJECTS)
         st.session_state["_cache_key"] = cache_key
 
-opt    = st.session_state["opt_result"]
-asgn   = opt["asgn"]
-load   = opt["load"]
+opt     = st.session_state["opt_result"]
+asgn    = opt["asgn"]
+ta      = opt["ta"]   # FIX #2: raw LP split hours
+load    = opt["load"]
 p_hours = opt["p_hours"]
 p_cost  = opt["p_cost"]
 
@@ -342,7 +325,6 @@ n_ok   = sum(1 for a in asgn.values() if a.get("employee") and not a.get("partia
 n_fail = sum(1 for a in asgn.values() if not a.get("employee"))
 n_part = sum(1 for a in asgn.values() if a.get("partial"))
 
-# Build per-employee task list for the Employees tab
 tasks_by_emp = {e["id"]: [] for e in EMPLOYEES}
 for t in TASKS:
     a = asgn.get(t["id"], {})
@@ -350,10 +332,12 @@ for t in TASKS:
         tasks_by_emp[a["employee"]].append({**t, **a})
 
 # Top-level KPIs
-c1, c2, c3 = st.columns(3)
+# FIX #7: separate unassigned from partial — they mean different things
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Utilization",   f"{util}%")
 c2.metric("Tasks Covered", f"{n_ok} / {len(TASKS)}")
-c3.metric("Unfilled",      n_fail + n_part)
+c3.metric("Unassigned",    n_fail)
+c4.metric("Partially Covered", n_part)
 
 if opt["status"] not in ("Optimal", "Not Solved"):
     st.warning(f"Solver status: {opt['status']} — results may be incomplete.")
@@ -401,23 +385,27 @@ with tabs[0]:
         for e in EMPLOYEES:
             if sk not in e["skills"]:
                 continue
-            # Only weight against skills that actually appear in tasks
             rel_skills = [s for s in e["skills"] if s in skill_demand]
             total_rel_demand = sum(skill_demand[s] for s in rel_skills)
             if total_rel_demand > 0:
-                sup += e["capacity"] * (dem / total_rel_demand)
+                # FIX #1: floor each employee's contribution so supply is never overestimated
+                sup += math.floor(e["capacity"] * (dem / total_rel_demand))
             else:
-                sup += e["capacity"] / max(len(e["skills"]), 1)
+                sup += math.floor(e["capacity"] / max(len(e["skills"]), 1))
+        # sup is now an integer sum of floored values — no further rounding needed
         ratio = dem / sup if sup else 99
         skill_rows.append({
             "Skill":      sk,
             "Employees":  sum(1 for e in EMPLOYEES if sk in e["skills"]),
             "Tasks":      sum(1 for t in TASKS if t["type"] == sk),
             "Demand (h)": dem,
-            "Supply (h)": sup,
+            "Supply (h)": int(sup),
+            # FIX #4: tighten HEALTHY/SURPLUS boundary — ratio<=0.7 is still a healthy buffer
             "Coverage %": round(min(sup / dem, 1) * 100) if dem else 100,
-            "Status":     "CRITICAL" if ratio > 1.3 else "TIGHT" if ratio > 1.0
-                          else "HEALTHY" if ratio > 0.6 else "SURPLUS",
+            "Status":     "CRITICAL" if ratio > 1.3
+                          else "TIGHT"   if ratio > 1.0
+                          else "HEALTHY" if ratio > 0.7
+                          else "SURPLUS",
         })
     st.dataframe(pd.DataFrame(skill_rows), use_container_width=True, hide_index=True,
         column_config={"Coverage %": st.column_config.ProgressColumn(
@@ -454,10 +442,10 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Employee Roster")
     for e in EMPLOYEES:
-        hrs  = load.get(e["id"], 0)
+        hrs    = load.get(e["id"], 0)
         util_e = round(hrs / e["capacity"] * 100) if e["capacity"] else 0
-        label = (f"**{e['id']}** [{e['type']}]  |  Skills: {', '.join(e['skills'])}"
-                 f"  |  ${e['rate']:.2f}/h  |  {util_e}% utilized ({hrs}/{e['capacity']} h)")
+        label  = (f"**{e['id']}** [{e['type']}]  |  Skills: {', '.join(e['skills'])}"
+                  f"  |  ${e['rate']:.2f}/h  |  {util_e}% utilized ({hrs}/{e['capacity']} h)")
         with st.expander(label):
             et = tasks_by_emp.get(e["id"], [])
             if not et:
@@ -494,37 +482,35 @@ with tabs[2]:
                 st.progress(min(cost / p["budget"], 1.0),
                             text=f"Wage budget: ${cost:,.0f} / ${p['budget']:,.0f}")
 
-            # Cost breakdown: aggregate hours and cost per employee for this project
             st.markdown("##### Cost Breakdown")
+            # FIX #2: use raw LP split hours from `ta` instead of rolled-up `asgn` hours
+            # asgn collapses multi-employee tasks to one primary employee, losing the splits
             cb = {}
             for t in pt:
-                a = asgn.get(t["id"], {})
-                eid = a.get("employee")
-                if eid:
+                for eid, hrs in ta.get(t["id"], {}).items():
                     cb.setdefault(eid, {"tasks": 0, "hours": 0.0})
                     cb[eid]["tasks"]  += 1
-                    cb[eid]["hours"]  += a.get("hours", 0)
+                    cb[eid]["hours"]  += hrs
 
             if cb:
                 cb_rows = [{
-                    "Employee":       eid,
-                    "Tasks":          v["tasks"],
-                    "Hours":          round(v["hours"], 1),
-                    "Rate ($/h)":     f"${emp_map[eid]['rate']:.2f}",
-                    "Cost ($)":       f"${v['hours'] * emp_map[eid]['rate']:,.2f}",
+                    "Employee":   eid,
+                    "Tasks":      v["tasks"],
+                    "Hours":      round(v["hours"], 1),
+                    "Rate ($/h)": f"${emp_map[eid]['rate']:.2f}",
+                    "Cost ($)":   f"${v['hours'] * emp_map[eid]['rate']:,.2f}",
                 } for eid, v in cb.items()]
                 cb_rows.append({
-                    "Employee": "TOTAL",
-                    "Tasks":    sum(r["Tasks"] for r in cb_rows),
-                    "Hours":    round(sum(r["Hours"] for r in cb_rows), 1),
+                    "Employee":   "TOTAL",
+                    "Tasks":      sum(r["Tasks"] for r in cb_rows),
+                    "Hours":      round(sum(r["Hours"] for r in cb_rows), 1),
                     "Rate ($/h)": "—",
-                    "Cost ($)": f"${cost:,.2f}",
+                    "Cost ($)":   f"${cost:,.2f}",   # use p_cost from optimizer (ground truth)
                 })
                 st.dataframe(pd.DataFrame(cb_rows), use_container_width=True, hide_index=True)
             else:
                 st.caption("No tasks assigned to this project.")
 
-            # Task detail table
             st.markdown("##### Task Details")
             st.dataframe(pd.DataFrame([{
                 "Task":         t["id"],
@@ -543,9 +529,9 @@ with tabs[3]:
     st.subheader("Full Task Assignment Matrix")
     rows = []
     for t in TASKS:
-        a   = asgn.get(t["id"], {})
-        eid = a.get("employee")
-        hrs = a.get("hours", 0)
+        a    = asgn.get(t["id"], {})
+        eid  = a.get("employee")
+        hrs  = a.get("hours", 0)
         cost_val = f"${hrs * emp_map[eid]['rate']:,.2f}" if eid and eid in emp_map else "—"
         rows.append({
             "Task":         t["id"],
@@ -560,3 +546,4 @@ with tabs[3]:
                             else "OK",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    
