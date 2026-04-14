@@ -381,35 +381,38 @@ with tabs[0]:
 
     for sk in all_skill_types:
         dem = skill_demand[sk]
-        sup = 0.0
+        sup_raw = 0.0
         for e in EMPLOYEES:
             if sk not in e["skills"]:
                 continue
             rel_skills = [s for s in e["skills"] if s in skill_demand]
             total_rel_demand = sum(skill_demand[s] for s in rel_skills)
             if total_rel_demand > 0:
-                # FIX #1: floor each employee's contribution so supply is never overestimated
-                sup += math.floor(e["capacity"] * (dem / total_rel_demand))
+                sup_raw += e["capacity"] * (dem / total_rel_demand)
             else:
-                sup += math.floor(e["capacity"] / max(len(e["skills"]), 1))
-        # sup is now an integer sum of floored values — no further rounding needed
+                sup_raw += e["capacity"] / max(len(e["skills"]), 1)
+        # FIX supply calc: sum all employees first, then floor once — more accurate than
+        # flooring each employee's fraction individually before summing
+        sup = math.floor(sup_raw)
         ratio = dem / sup if sup else 99
+        # FIX coverage %: remove min(...,1) cap so values above 100% show the real surplus
+        # e.g. 142% means supply is 42% above demand — useful signal, not just "100%"
+        coverage_pct = round(sup / dem * 100) if dem else 100
         skill_rows.append({
-            "Skill":      sk,
-            "Employees":  sum(1 for e in EMPLOYEES if sk in e["skills"]),
-            "Tasks":      sum(1 for t in TASKS if t["type"] == sk),
-            "Demand (h)": dem,
-            "Supply (h)": int(sup),
-            # FIX #4: tighten HEALTHY/SURPLUS boundary — ratio<=0.7 is still a healthy buffer
-            "Coverage %": round(min(sup / dem, 1) * 100) if dem else 100,
-            "Status":     "CRITICAL" if ratio > 1.3
-                          else "TIGHT"   if ratio > 1.0
-                          else "HEALTHY" if ratio > 0.7
-                          else "SURPLUS",
+            "Skill":           sk,
+            "Employees":       sum(1 for e in EMPLOYEES if sk in e["skills"]),
+            "Tasks":           sum(1 for t in TASKS if t["type"] == sk),
+            "Demand (h)":      dem,
+            "Supply (h)":      sup,
+            "Supply/Demand %": coverage_pct,
+            "Status":          "CRITICAL" if ratio > 1.3
+                               else "TIGHT"   if ratio > 1.0
+                               else "HEALTHY" if ratio > 0.7
+                               else "SURPLUS",
         })
     st.dataframe(pd.DataFrame(skill_rows), use_container_width=True, hide_index=True,
-        column_config={"Coverage %": st.column_config.ProgressColumn(
-            "Coverage %", min_value=0, max_value=100, format="%d%%"
+        column_config={"Supply/Demand %": st.column_config.ProgressColumn(
+            "Supply/Demand %", min_value=0, max_value=200, format="%d%%"
         )},
     )
 
@@ -546,4 +549,3 @@ with tabs[3]:
                             else "OK",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    
