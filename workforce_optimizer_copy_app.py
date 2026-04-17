@@ -32,6 +32,26 @@ def format_supply_vs_demand_pct(sup: float, dem: float) -> str:
     return f"+{pct}%" if pct > 0 else f"{pct}%"
 
 
+def roster_skill_supply_hours(
+    employees,
+    skill: str,
+    task_skill_types: set[str],
+) -> float:
+    """Capacity split only across skills that appear on tasks (and that the person has)."""
+    if skill not in task_skill_types:
+        return 0.0
+    total = 0.0
+    for e in employees:
+        skills = e.get("skills") or []
+        if skill not in skills:
+            continue
+        active = [s for s in skills if s in task_skill_types]
+        if not active:
+            continue
+        total += e["capacity"] / len(active)
+    return total
+
+
 def status_style(v: str) -> str:
     if v == "Green":
         return "background-color: #d1fae5; color: #065f46; font-weight: 600;"
@@ -441,17 +461,19 @@ with tabs[0]:
 
     st.subheader("Skills: supply vs demand")
     st.caption(
-        "**vs demand**: weekly skilled capacity vs task hours for that skill "
-        "(positive = surplus, negative = shortfall)."
+        "**Supply (h)** splits each person's week only across skills that **appear on tasks** "
+        "(and that they have). **vs demand** is surplus (+) or shortfall (−) vs task hours."
     )
+    skill_types = sorted(set(t["type"] for t in TASKS))
+    task_skill_types = set(skill_types)
     skill_rows = []
-    for sk in sorted(set(t["type"] for t in TASKS)):
+    for sk in skill_types:
         dem = sum(t["minHours"] for t in TASKS if t["type"] == sk)
-        sup = sum(e["capacity"] for e in EMPLOYEES if sk in e["skills"])
+        sup = roster_skill_supply_hours(EMPLOYEES, sk, task_skill_types)
         skill_rows.append({
             "Skill":       sk,
             "Demand (h)":  dem,
-            "Supply (h)":  sup,
+            "Supply (h)":  round(sup, 1),
             "vs demand":   format_supply_vs_demand_pct(sup, dem),
         })
     st.dataframe(pd.DataFrame(skill_rows), use_container_width=True, hide_index=True)
