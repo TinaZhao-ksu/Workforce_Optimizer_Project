@@ -1,5 +1,6 @@
 import io
 import hashlib
+import math
 import streamlit as st
 import pandas as pd
 import pulp
@@ -37,7 +38,7 @@ def roster_skill_supply_hours(
     skill: str,
     task_skill_types: set[str],
 ) -> float:
-    """Capacity split only across skills that appear on tasks (and that the person has)."""
+    """Capacity split only across skills that appear on tasks; result floored to whole hours."""
     if skill not in task_skill_types:
         return 0.0
     total = 0.0
@@ -49,7 +50,7 @@ def roster_skill_supply_hours(
         if not active:
             continue
         total += e["capacity"] / len(active)
-    return total
+    return math.floor(total)
 
 
 def status_style(v: str) -> str:
@@ -461,8 +462,8 @@ with tabs[0]:
 
     st.subheader("Skills: supply vs demand")
     st.caption(
-        "**Supply (h)** splits each person's week only across skills that **appear on tasks** "
-        "(and that they have). **vs demand** is surplus (+) or shortfall (−) vs task hours."
+        "**Supply (h)** uses task-relevant skills only, then **rounds down** to whole hours "
+        "(no overstatement). **vs demand** uses that same supply vs task hours."
     )
     skill_types = sorted(set(t["type"] for t in TASKS))
     task_skill_types = set(skill_types)
@@ -473,7 +474,7 @@ with tabs[0]:
         skill_rows.append({
             "Skill":       sk,
             "Demand (h)":  dem,
-            "Supply (h)":  round(sup, 1),
+            "Supply (h)":  int(sup),
             "vs demand":   format_supply_vs_demand_pct(sup, dem),
         })
     st.dataframe(pd.DataFrame(skill_rows), use_container_width=True, hide_index=True)
