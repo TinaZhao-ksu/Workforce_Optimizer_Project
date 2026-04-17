@@ -473,8 +473,8 @@ with tabs[0]:
 
     st.subheader("Skills: supply vs demand")
     st.caption(
-        "**Supply (h)** uses task-relevant skills only, then **rounds down** to whole hours "
-        "(no overstatement). **vs demand** uses that same supply vs task hours."
+        "**Supply (h)** counts only task-relevant skills and **rounds down** to whole hours. "
+        "**vs demand**: `+` means surplus capacity, `−` means a shortfall (compared to task hours)."
     )
     skill_types = sorted(set(t["type"] for t in TASKS))
     task_skill_types = set(skill_types)
