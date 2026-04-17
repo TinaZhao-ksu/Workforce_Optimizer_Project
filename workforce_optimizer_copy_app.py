@@ -244,23 +244,34 @@ def run_optimizer(employees, tasks, projects):
     prob = pulp.LpProblem("wf", pulp.LpMinimize)
     x = {(i, j): pulp.LpVariable(f"x_{i}_{j}", lowBound=0) for i, j in pairs}
     s = {t["id"]: pulp.LpVariable(f"s_{t['id']}", lowBound=0) for t in tasks}
+    u = {e["id"]: pulp.LpVariable(f"u_{e['id']}", lowBound=0) for e in employees}
 
     # Objective:
     # 1) Strongly minimize unmet task hours
     # 2) Then prefer lower total labor cost among equally covered plans
     unmet_penalty = 10000
+    underutil_penalty = 50
     prob += pulp.lpSum(
         unmet_penalty * (2 if proj_map.get(task_map[j]["project"], {}).get("reimbursable") else 1) * s[j]
         for j in s
     ) + 0.01 * pulp.lpSum(
         x[(i, j)] * emp_map[i]["rate"] for i, j in pairs
-    )
+    ) + underutil_penalty * pulp.lpSum(u[e["id"]] for e in employees)
 
     # Constraint 1: employee capacity
     for e in employees:
         ep = [j for i, j in pairs if i == e["id"]]
         if ep:
             prob += pulp.lpSum(x[(e["id"], j)] for j in ep) <= e["capacity"]
+
+    # Constraint 1b: minimum weekly hours (soft via slack)
+    MIN_WEEKLY_HOURS = 10
+    for e in employees:
+        ep = [j for i, j in pairs if i == e["id"]]
+        if not ep:
+            continue
+        min_target = min(MIN_WEEKLY_HOURS, e["capacity"])
+        prob += pulp.lpSum(x[(e["id"], j)] for j in ep) + u[e["id"]] >= min_target
 
     # Constraint 2: task demand
     for t in tasks:
@@ -522,7 +533,6 @@ with tabs[1]:
                     "Skill":        t["type"],
                     "Min Hrs":      t["minHours"],
                     "Assigned Hrs": round(t.get("hours", 0), 1),
-                    "Role":         "Primary" if t.get("is_primary") else "Contributor",
                     "Status":       "Partial" if t.get("partial") else "OK",
                 } for t in et]), use_container_width=True, hide_index=True)
 
