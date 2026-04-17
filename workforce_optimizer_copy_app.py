@@ -519,15 +519,20 @@ with tabs[2]:
                   f"  |  {signal}  |  {status_label}  |  {round(asn, 1)}/{dem} h  |  ${cost:,.0f}")
 
         with st.expander(header):
+            # Plain text (no markdown bold): commas in dollar amounts break **…** in captions.
             if p["maxTotal"]:
                 hp = min(999, round(asn / p["maxTotal"] * 100))
-                st.caption(f"Hour budget: **{round(asn, 1)}** / **{p['maxTotal']}** h ({hp}% of cap)")
+                st.write(f"Hour budget: {round(asn, 1)} / {p['maxTotal']} h ({hp}% of cap)")
             if p["budget"]:
                 wp = min(999, round(cost / p["budget"] * 100))
-                st.caption(f"Wage budget: **${cost:,.0f}** / **${p['budget']:,.0f}** ({wp}% of budget)")
+                st.write(f"Wage budget: ${cost:,.0f} / ${p['budget']:,.0f} ({wp}% of budget)")
 
             # Cost breakdown: aggregate hours and cost per employee for this project
-            st.markdown("##### Cost Breakdown")
+            st.markdown(
+                '<p style="font-size:1rem;font-weight:600;margin:1rem 0 0.35rem 0;">'
+                "Cost breakdown</p>",
+                unsafe_allow_html=True,
+            )
             cb = {}
             for t in pt:
                 a = asgn.get(t["id"], {})
@@ -555,8 +560,11 @@ with tabs[2]:
             else:
                 st.caption("No tasks assigned to this project.")
 
-            # Task detail table
-            st.markdown("##### Task Details")
+            st.markdown(
+                '<p style="font-size:1rem;font-weight:600;margin:1rem 0 0.35rem 0;">'
+                "Task details</p>",
+                unsafe_allow_html=True,
+            )
             st.dataframe(pd.DataFrame([{
                 "Task":         t["id"],
                 "Skill":        t["type"],
