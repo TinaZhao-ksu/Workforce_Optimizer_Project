@@ -516,7 +516,7 @@ with tabs[0]:
 
 # Employees tab
 with tabs[1]:
-    st.subheader("Employee Roster")
+    st.subheader("Employee")
     for e in EMPLOYEES:
         hrs  = load.get(e["id"], 0)
         util_e = round(hrs / e["capacity"] * 100) if e["capacity"] else 0
